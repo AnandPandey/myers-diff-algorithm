@@ -1,396 +1,414 @@
 import sys
+from array import array
 
 
-def read_lines(path):
-    """Read a file as raw bytes and split it into lines."""
+def load_file(path):
     try:
-        with open(path, "rb") as file:
-            data = file.read()
-    except (OSError, IOError) as error:
-        print(f"error: cannot read {path}: {error}", file=sys.stderr)
+        with open(path, "rb") as f:
+            content = f.read()
+    except OSError as err:
+        print(f"error: cannot read {path}: {err}", file=sys.stderr)
         return None
 
-    # Split only on the newline byte.
-    lines = data.split(b"\n")
+    parts = content.split(b"\n")
 
-    # A final newline does not create an extra empty line.
-    if lines and lines[-1] == b"":
-        lines.pop()
+    if parts and parts[-1] == b"":
+        parts.pop()
 
-    return lines
+    return parts
 
 
-def myers_diff(a, b):
-    n = len(a)
-    m = len(b)
+def traceback_value(row, diagonal, distance):
+    if diagonal < -distance or diagonal > distance:
+        return -1
+
+    return row[diagonal + distance]
+
+
+def restore_script(left, right, layers, last_distance):
+    x = len(left)
+    y = len(right)
+    reversed_script = []
+
+    for distance in range(last_distance, 0, -1):
+        diagonal = x - y
+        previous_layer = layers[distance - 1]
+
+        down_value = traceback_value(
+            previous_layer,
+            diagonal + 1,
+            distance - 1
+        )
+
+        right_value = traceback_value(
+            previous_layer,
+            diagonal - 1,
+            distance - 1
+        )
+
+        if diagonal == -distance:
+            previous_diagonal = diagonal + 1
+        elif diagonal == distance:
+            previous_diagonal = diagonal - 1
+        elif right_value + 1 >= down_value:
+            previous_diagonal = diagonal - 1
+        else:
+            previous_diagonal = diagonal + 1
+
+        previous_x = traceback_value(
+            previous_layer,
+            previous_diagonal,
+            distance - 1
+        )
+
+        previous_y = previous_x - previous_diagonal
+
+        while x > previous_x and y > previous_y:
+            x -= 1
+            y -= 1
+            reversed_script.append(("keep", left[x]))
+
+        if x == previous_x:
+            y -= 1
+            reversed_script.append(("insert", right[y]))
+        else:
+            x -= 1
+            reversed_script.append(("delete", left[x]))
+
+    while x > 0 and y > 0:
+        x -= 1
+        y -= 1
+        reversed_script.append(("keep", left[x]))
+
+    while x > 0:
+        x -= 1
+        reversed_script.append(("delete", left[x]))
+
+    while y > 0:
+        y -= 1
+        reversed_script.append(("insert", right[y]))
+
+    reversed_script.reverse()
+    return reversed_script
+
+
+def compute_myers(left, right):
+    n = len(left)
+    m = len(right)
 
     if n == 0:
-        return [("insert", value) for value in b]
+        return [("insert", value) for value in right]
 
     if m == 0:
-        return [("delete", value) for value in a]
+        return [("delete", value) for value in left]
 
-    if a == b:
-        return [("keep", value) for value in a]
+    if left == right:
+        return [("keep", value) for value in left]
 
-    max_d = n + m
+    limit = n + m
+    middle = limit + 1
 
-    # V[k] = furthest x reached on diagonal k
-    v = {0: 0}
+    frontier = [-1] * (2 * limit + 3)
 
-    # Save V after every completed d level.
-    trace = []
+    # Initial Myers frontier.
+    frontier[middle + 1] = 0
 
-    for d in range(max_d + 1):
+    layers = []
 
-        for k in range(-d, d + 1, 2):
+    for distance in range(limit + 1):
+        first_diagonal = -distance
+        last_diagonal = distance
 
-            # Decide whether the path comes from:
-            # k + 1 -> insertion
-            # k - 1 -> deletion
-            if k == -d:
-                x = v.get(k + 1, 0)
+        for diagonal in range(
+            first_diagonal,
+            last_diagonal + 1,
+            2
+        ):
+            slot = middle + diagonal
 
-            elif k == d:
-                x = v.get(k - 1, 0) + 1
+            if diagonal == -distance:
+                x = frontier[slot + 1]
+
+            elif diagonal == distance:
+                x = frontier[slot - 1] + 1
+
+            elif frontier[slot - 1] >= frontier[slot + 1]:
+                # Prefer deletion when both paths are equally long.
+                x = frontier[slot - 1] + 1
 
             else:
-                # Prefer deletion when both choices reach
-                # the same or similar position.
-                if v.get(k - 1, -1) + 1 >= v.get(k + 1, -1):
-                    x = v.get(k - 1, -1) + 1
-                else:
-                    x = v.get(k + 1, -1)
+                x = frontier[slot + 1]
 
-            y = x - k
+            y = x - diagonal
 
-            # Follow the diagonal as far as possible.
-            while x < n and y < m and a[x] == b[y]:
+            while (
+                x < n
+                and y < m
+                and left[x] == right[y]
+            ):
                 x += 1
                 y += 1
 
-            v[k] = x
+            frontier[slot] = x
 
-            # We reached the end.
             if x >= n and y >= m:
-                trace.append(v.copy())
-                return reconstruct(a, b, trace)
+                layers.append(
+                    array(
+                        "i",
+                        frontier[
+                            middle + first_diagonal:
+                            middle + last_diagonal + 1
+                        ]
+                    )
+                )
 
-        trace.append(v.copy())
+                return restore_script(
+                    left,
+                    right,
+                    layers,
+                    distance
+                )
+
+        # Save only the diagonals active at this distance.
+        layers.append(
+            array(
+                "i",
+                frontier[
+                    middle + first_diagonal:
+                    middle + last_diagonal + 1
+                ]
+            )
+        )
 
     return []
 
 
+def normalize_changes(script):
+    arranged = []
+    index = 0
 
-def reconstruct(a, b, trace):
-    x = len(a)
-    y = len(b)
+    while index < len(script):
+        if script[index][0] == "keep":
+            arranged.append(script[index])
+            index += 1
+            continue
 
-    operations = []
+        removed = []
+        added = []
 
-    # Work backwards through d = D ... 1
-    for d in range(len(trace) - 1, 0, -1):
+        while (
+            index < len(script)
+            and script[index][0] != "keep"
+        ):
+            kind, value = script[index]
 
-        v_previous = trace[d - 1]
-
-        k = x - y
-
-        # Decide which previous diagonal we came from.
-        if k == -d:
-            previous_k = k + 1
-
-        elif k == d:
-            previous_k = k - 1
-
-        else:
-            left = v_previous.get(k - 1, -1)
-            right = v_previous.get(k + 1, -1)
-
-            # Deletion has priority when tied.
-            if left + 1 >= right:
-                previous_k = k - 1
+            if kind == "delete":
+                removed.append((kind, value))
             else:
-                previous_k = k + 1
+                added.append((kind, value))
 
-        previous_x = v_previous.get(previous_k, 0)
-        previous_y = previous_x - previous_k
+            index += 1
 
-        # Everything between previous position and current
-        # position on the diagonal is a match.
-        while x > previous_x and y > previous_y:
-            operations.append(("keep", a[x - 1]))
-            x -= 1
-            y -= 1
+        arranged.extend(removed)
+        arranged.extend(added)
 
-        # One edit happened before the diagonal.
-        if x == previous_x:
-            # Insertion from B.
-            if y > 0:
-                operations.append(("insert", b[y - 1]))
-                y -= 1
+    return arranged
+
+
+def diff(left, right):
+    return normalize_changes(
+        compute_myers(left, right)
+    )
+
+
+def merge_ranges(ranges):
+    if not ranges:
+        return "."
+
+    result = []
+
+    for start, finish in ranges:
+        if result and start <= result[-1][1]:
+            old_start, old_finish = result[-1]
+            result[-1] = (
+                old_start,
+                max(old_finish, finish)
+            )
         else:
-            # Deletion from A.
-            if x > 0:
-                operations.append(("delete", a[x - 1]))
-                x -= 1
+            result.append((start, finish))
 
-    # Any remaining diagonal at the beginning.
-    while x > 0 and y > 0:
-        operations.append(("keep", a[x - 1]))
-        x -= 1
-        y -= 1
+    return ",".join(
+        f"{start}-{finish}"
+        for start, finish in result
+    )
 
-    while x > 0:
-        operations.append(("delete", a[x - 1]))
-        x -= 1
 
-    while y > 0:
-        operations.append(("insert", b[y - 1]))
-        y -= 1
+def character_ranges(old_line, new_line):
+    old_chars = list(old_line.decode("utf-8"))
+    new_chars = list(new_line.decode("utf-8"))
 
-    operations.reverse()
-
-    return operations
-
-def get_changed_ranges(old_text, new_text):
-    old_chars = list(old_text)
-    new_chars = list(new_text)
-
-    operations = myers_diff(old_chars, new_chars)
+    script = diff(old_chars, new_chars)
 
     old_ranges = []
     new_ranges = []
 
-    old_index = 0
-    new_index = 0
+    old_pos = 0
+    new_pos = 0
 
-    old_start = None
-    old_end = None
+    active_old = None
+    active_new = None
 
-    new_start = None
-    new_end = None
+    for kind, _ in script:
+        if kind == "keep":
+            if active_old is not None:
+                old_ranges.append(
+                    (active_old, old_pos)
+                )
+                active_old = None
 
-    def add_old_range(start, end):
-        if start == end:
-            return
+            if active_new is not None:
+                new_ranges.append(
+                    (active_new, new_pos)
+                )
+                active_new = None
 
-        if old_ranges and start <= old_ranges[-1][1]:
-            old_ranges[-1] = (
-                old_ranges[-1][0],
-                max(old_ranges[-1][1], end)
-            )
+            old_pos += 1
+            new_pos += 1
+
+        elif kind == "delete":
+            if active_old is None:
+                active_old = old_pos
+
+            old_pos += 1
+
         else:
-            old_ranges.append((start, end))
+            if active_new is None:
+                active_new = new_pos
 
-    def add_new_range(start, end):
-        if start == end:
-            return
+            new_pos += 1
 
-        if new_ranges and start <= new_ranges[-1][1]:
-            new_ranges[-1] = (
-                new_ranges[-1][0],
-                max(new_ranges[-1][1], end)
-            )
-        else:
-            new_ranges.append((start, end))
+    if active_old is not None:
+        old_ranges.append(
+            (active_old, old_pos)
+        )
 
-    for operation, value in operations:
+    if active_new is not None:
+        new_ranges.append(
+            (active_new, new_pos)
+        )
 
-        if operation == "keep":
-
-            if old_start is not None:
-                add_old_range(old_start, old_end)
-                old_start = None
-                old_end = None
-
-            if new_start is not None:
-                add_new_range(new_start, new_end)
-                new_start = None
-                new_end = None
-
-            old_index += 1
-            new_index += 1
-
-        elif operation == "delete":
-
-            if old_start is None:
-                old_start = old_index
-
-            old_index += 1
-            old_end = old_index
-
-        elif operation == "insert":
-
-            if new_start is None:
-                new_start = new_index
-
-            new_index += 1
-            new_end = new_index
-
-    if old_start is not None:
-        add_old_range(old_start, old_end)
-
-    if new_start is not None:
-        add_new_range(new_start, new_end)
-
-    old_result = ",".join(
-        str(start) + "-" + str(end)
-        for start, end in old_ranges
+    return (
+        merge_ranges(old_ranges),
+        merge_ranges(new_ranges)
     )
 
-    new_result = ",".join(
-        str(start) + "-" + str(end)
-        for start, end in new_ranges
-    )
 
-    if old_result == "":
-        old_result = "."
+def output_lines(script):
+    stream = sys.stdout.buffer
 
-    if new_result == "":
-        new_result = "."
-
-    return old_result, new_result
-
-
-def write_lines_diff(operations):
-    """Write Part A output as exact bytes."""
-
-    output = bytearray()
-
-    i = 0
-
-    while i < len(operations):
-        operation, value = operations[i]
-
-        if operation == "keep":
-            output.extend(b" ")
-            output.extend(value)
-            output.extend(b"\n")
-            i += 1
-
+    for kind, line in script:
+        if kind == "keep":
+            marker = b" "
+        elif kind == "delete":
+            marker = b"-"
         else:
-            # A change block contains consecutive deletes/inserts.
-            deletes = []
-            inserts = []
+            marker = b"+"
 
-            while i < len(operations) and operations[i][0] != "keep":
-                operation, value = operations[i]
+        stream.write(marker)
+        stream.write(line)
+        stream.write(b"\n")
 
-                if operation == "delete":
-                    deletes.append(value)
-                else:
-                    inserts.append(value)
 
-                i += 1
+def output_highlight(script):
+    stream = sys.stdout.buffer
+    index = 0
 
-            # Assignment requirement:
-            # all deletes must come before all inserts.
-            for value in deletes:
-                output.extend(b"-")
-                output.extend(value)
-                output.extend(b"\n")
+    while index < len(script):
 
-            for value in inserts:
-                output.extend(b"+")
-                output.extend(value)
-                output.extend(b"\n")
-
-    sys.stdout.buffer.write(output)
-    
-def write_highlight_diff(operations):
-    output = bytearray()
-
-    i = 0
-
-    while i < len(operations):
-
-        operation, value = operations[i]
-
-        if operation == "keep":
-
-            output.extend(b" ")
-            output.extend(value)
-            output.extend(b"\n")
-
-            i += 1
+        if script[index][0] == "keep":
+            stream.write(b" ")
+            stream.write(script[index][1])
+            stream.write(b"\n")
+            index += 1
             continue
 
-        # Collect one change block.
-        deletes = []
-        inserts = []
+        removed = []
+        added = []
 
-        while i < len(operations) and operations[i][0] != "keep":
+        while (
+            index < len(script)
+            and script[index][0] != "keep"
+        ):
+            kind, line = script[index]
 
-            operation, value = operations[i]
-
-            if operation == "delete":
-                deletes.append(value)
+            if kind == "delete":
+                removed.append(line)
             else:
-                inserts.append(value)
+                added.append(line)
 
-            i += 1
+            index += 1
 
-        # Part A output:
-        # all deletions first
-        for value in deletes:
-            output.extend(b"-")
-            output.extend(value)
-            output.extend(b"\n")
+        for line in removed:
+            stream.write(b"-")
+            stream.write(line)
+            stream.write(b"\n")
 
-        # Then insertions.
-        for index in range(len(inserts)):
+        for number, line in enumerate(added):
+            stream.write(b"+")
+            stream.write(line)
+            stream.write(b"\n")
 
-            new_value = inserts[index]
-
-            output.extend(b"+")
-            output.extend(new_value)
-            output.extend(b"\n")
-
-            # Pair the insertion with the corresponding deletion.
-            if index < len(deletes):
-
-                old_value = deletes[index]
-
-                # Part B highlighting is only required for
-                # valid UTF-8 changed lines.
-                old_text = old_value.decode("utf-8")
-                new_text = new_value.decode("utf-8")
-
-                old_ranges, new_ranges = get_changed_ranges(
-                    old_text,
-                    new_text
+            if number < len(removed):
+                old_range, new_range = character_ranges(
+                    removed[number],
+                    line
                 )
 
-                output.extend(b"? ")
-                output.extend(old_ranges.encode("utf-8"))
-                output.extend(b" | ")
-                output.extend(new_ranges.encode("utf-8"))
-                output.extend(b"\n")
+                stream.write(
+                    b"? "
+                    + old_range.encode("utf-8")
+                    + b" | "
+                    + new_range.encode("utf-8")
+                    + b"\n"
+                )
 
-    sys.stdout.buffer.write(output)
 
-
-def main() -> int:
-    if len(sys.argv) != 4 or sys.argv[1] not in ("lines", "highlight"):
-        print("usage: main.py lines|highlight A_PATH B_PATH", file=sys.stderr)
+def main():
+    if len(sys.argv) != 4:
+        print(
+            "Usage: python src/main.py lines A B",
+            file=sys.stderr
+        )
+        print(
+            "   or: python src/main.py highlight A B",
+            file=sys.stderr
+        )
         return 2
 
-    command, a_path, b_path = sys.argv[1:]
+    command = sys.argv[1]
+    first_path = sys.argv[2]
+    second_path = sys.argv[3]
 
-    a = read_lines(a_path)
-    b = read_lines(b_path)
+    first = load_file(first_path)
+    second = load_file(second_path)
 
-    if a is None or b is None:
+    if first is None or second is None:
         return 2
-
-    operations = myers_diff(a, b)
 
     if command == "lines":
-        write_lines_diff(operations)
-    else:
-        write_highlight_diff(operations)
-        
-    return 0
+        output_lines(diff(first, second))
+        return 0
+
+    if command == "highlight":
+        output_highlight(diff(first, second))
+        return 0
+
+    print(
+        "error: mode must be 'lines' or 'highlight'",
+        file=sys.stderr
+    )
+    return 2
 
 
-raise SystemExit(main())
+if __name__ == "__main__":
+    sys.exit(main())
